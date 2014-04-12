@@ -11,7 +11,8 @@
 
 #include "spminterface.h"  /* must be included as first! */
 
-#include <avr/io.h>
+#include "../misc/iofixes.h"
+
 #include <avr/interrupt.h>
 #include <avr/pgmspace.h>
 #include <avr/wdt.h>
@@ -112,8 +113,26 @@ typedef union longConverter{
 }longConverter_t;
 
 
-#if BOOTLOADER_CAN_EXIT
-static volatile unsigned char	stayinloader = 0xfe;
+#if (BOOTLOADER_CAN_EXIT)
+#	if (BOOTLOADER_LOOPCYCLES_TIMEOUT)
+#		if (BOOTLOADER_LOOPCYCLES_TIMEOUT < 256)
+#			if ((HAVE_UNPRECISEWAIT))
+volatile register uint8_t timeout_remaining __asm__("r2");
+#			else
+static volatile uint8_t timeout_remaining;
+#			endif
+#		else
+static volatile uint16_t timeout_remaining;
+#		endif
+#	endif
+
+#	define stayinloader_initialValue 0xfe
+#	if ((HAVE_UNPRECISEWAIT))
+/* here we have to assume we need to optimize for every byte */
+volatile register uint8_t stayinloader __asm__("r17");
+#	else
+static volatile uint8_t stayinloader;
+#	endif
 #endif
 
 static longConverter_t  	currentAddress; /* in bytes */
@@ -128,6 +147,8 @@ static const uchar      	currentRequest = 0;
 static const uchar  signatureBytes[4] = {
 #ifdef SIGNATURE_BYTES
     SIGNATURE_BYTES
+#elif defined (__AVR_ATmega8535__)
+    0x1e, 0x93, 0x08, 0
 #elif defined (__AVR_ATmega8__) || defined (__AVR_ATmega8A__) || defined (__AVR_ATmega8HVA__)
     0x1e, 0x93, 0x07, 0
 #elif defined (__AVR_ATmega16__)
@@ -144,6 +165,8 @@ static const uchar  signatureBytes[4] = {
     0x1e, 0x93, 0x0a, 0
 #elif defined (__AVR_ATmega88PA__)
     0x1e, 0x93, 0x0F, 0
+#elif defined (__AVR_ATmega162__)
+    0x1e, 0x94, 0x04, 0
 #elif defined (__AVR_ATmega164A__)
     0x1e, 0x94, 0x0f, 0
 #elif defined (__AVR_ATmega164P__) || defined (__AVR_ATmega164PA__)
@@ -194,6 +217,44 @@ static const uchar  signatureBytes[4] = {
 
 /* ------------------------------------------------------------------------ */
 
+#if (HAVE_BOOTLOADERENTRY_FROMSOFTWARE)
+void __attribute__ ((section(".init3"),naked,used,no_instrument_function)) __BOOTLOADERENTRY_FROMSOFTWARE__bootup_investigate_RAMEND(void);
+void __BOOTLOADERENTRY_FROMSOFTWARE__bootup_investigate_RAMEND(void) {
+  asm volatile (
+    "in		%[mcucsrval]	,	%[mcucsrio]\n\t"
+    "ldi	r29		,	%[ramendhi]\n\t"
+    "ldi	r28		,	%[ramendlo]\n\t"
+#if (FLASHEND>131071)
+    "ld		%[result]	,	Y+\n\t"
+    "cpi	%[result]	,	%[bootaddrhi]\n\t"
+    "brne	__BOOTLOADERENTRY_FROMSOFTWARE__bootup_investigate_RAMEND_mismatch%=\n\t"
+#endif
+    "ld		%[result]	,	Y+\n\t"
+    "cpi	%[result]	,	%[bootaddrme]\n\t"
+    "ld		%[result]	,	Y+\n\t"
+    "breq	__BOOTLOADERENTRY_FROMSOFTWARE__bootup_investigate_RAMEND_done%=\n\t"
+
+    "__BOOTLOADERENTRY_FROMSOFTWARE__bootup_investigate_RAMEND_mismatch%=:\n\t"
+    "ldi	%[result]	,	0xff\n\t"
+
+    "__BOOTLOADERENTRY_FROMSOFTWARE__bootup_investigate_RAMEND_done%=:\n\t"
+    : [result]		"=a" (__BOOTLOADERENTRY_FROMSOFTWARE__bootup_RAMEND_doesmatch),
+      [mcucsrval]	"=a" (__BOOTLOADERENTRY_FROMSOFTWARE__bootup_MCUCSR)
+    : [mcucsrio]	"I"  (_SFR_IO_ADDR(MCUCSR)),
+#if (FLASHEND>131071)
+      [ramendhi]	"M" (((RAMEND - 2) >> 8) & 0xff),
+      [ramendlo]	"M" (((RAMEND - 2) >> 0) & 0xff),
+      [bootaddrhi]	"M" (((__BOOTLOADERENTRY_FROMSOFTWARE__EXPECTEDADDRESS) >>16) & 0xff),
+#else
+      [ramendhi]	"M" (((RAMEND - 1) >> 8) & 0xff),
+      [ramendlo]	"M" (((RAMEND - 1) >> 0) & 0xff),
+#endif
+      [bootaddrme]	"M" (((__BOOTLOADERENTRY_FROMSOFTWARE__EXPECTEDADDRESS) >> 8) & 0xff)
+    
+  );
+}
+#endif
+
 #if (USE_BOOTUP_CLEARRAM)
 /*
 * Under normal circumstances, RESET will not clear contents of RAM.
@@ -204,8 +265,10 @@ void __func_clearram(void) {
   extern size_t __bss_end;
   asm volatile (
     "__clearram:\n\t"
+#if (!(HAVE_BOOTLOADERENTRY_FROMSOFTWARE))
     "ldi r29, %[ramendhi]\n\t"
     "ldi r28, %[ramendlo]\n\t"
+#endif
     "__clearramloop%=:\n\t"
     "st -Y , __zero_reg__\n\t"
     "cp r28, %A[bssend]\n\t"
@@ -291,7 +354,9 @@ uchar usbFunctionSetup_USBASP_FUNC_TRANSMIT(usbRequest_t *rq) {
     rval = rq->wIndex.bytes[0] & 3;
     rval = signatureBytes[rval];
 #if HAVE_READ_LOCK_FUSE
-#if defined (__AVR_ATmega8__) || defined (__AVR_ATmega8A__) || defined (__AVR_ATmega16__) || defined (__AVR_ATmega32__)
+#if defined (__AVR_ATmega8535__) || 					\
+    defined (__AVR_ATmega8__) || defined (__AVR_ATmega8A__) || 		\
+    defined (__AVR_ATmega16__) || defined (__AVR_ATmega32__)
   }else if(rq->wValue.bytes[0] == 0x58 && rq->wValue.bytes[1] == 0x00){  /* read lock bits */
       rval = boot_lock_fuse_bits_get(GET_LOCK_BITS);
   }else if(rq->wValue.bytes[0] == 0x50 && rq->wValue.bytes[1] == 0x00){  /* read lfuse bits */
@@ -301,6 +366,7 @@ uchar usbFunctionSetup_USBASP_FUNC_TRANSMIT(usbRequest_t *rq) {
 
 #elif defined (__AVR_ATmega48__)   || defined (__AVR_ATmega48A__)   || defined (__AVR_ATmega48P__)   || defined (__AVR_ATmega48PA__)  ||  \
 defined (__AVR_ATmega88__)   || defined (__AVR_ATmega88A__)   || defined (__AVR_ATmega88P__)   || defined (__AVR_ATmega88PA__)  ||  \
+defined (__AVR_ATmega162__)  || 												      \
 defined (__AVR_ATmega164A__) || defined (__AVR_ATmega164P__)  || 								      \
 defined (__AVR_ATmega168__)  || defined (__AVR_ATmega168A__)  || defined (__AVR_ATmega168P__)  || defined (__AVR_ATmega168PA__) ||  \
 defined (__AVR_ATmega324A__) || defined (__AVR_ATmega324P__)  ||								      \
@@ -363,6 +429,23 @@ defined (__AVR_ATmega2561__)
 #   endif
       }
 #endif
+#if ((HAVE_BOOTLOADER_HIDDENEXITCOMMAND) && (BOOTLOADER_CAN_EXIT))
+#	if ((HAVE_BOOTLOADER_HIDDENEXITCOMMAND != 0xac) && \
+	    (HAVE_BOOTLOADER_HIDDENEXITCOMMAND != 0x20) && (HAVE_BOOTLOADER_HIDDENEXITCOMMAND != 0x28) && \
+	    (HAVE_BOOTLOADER_HIDDENEXITCOMMAND != 0x40) && (HAVE_BOOTLOADER_HIDDENEXITCOMMAND != 0x48) && \
+	    (HAVE_BOOTLOADER_HIDDENEXITCOMMAND != 0x4c) && \
+	    (HAVE_BOOTLOADER_HIDDENEXITCOMMAND != 0xa0) && \
+	    (HAVE_BOOTLOADER_HIDDENEXITCOMMAND != 0xc0) && \
+	    (HAVE_BOOTLOADER_HIDDENEXITCOMMAND != 0x58) && \
+	    (HAVE_BOOTLOADER_HIDDENEXITCOMMAND != 0x5c) && \
+	    (HAVE_BOOTLOADER_HIDDENEXITCOMMAND != 0x30) && \
+	    (HAVE_BOOTLOADER_HIDDENEXITCOMMAND != 0xac) && \
+	    (HAVE_BOOTLOADER_HIDDENEXITCOMMAND != 0x50) && (HAVE_BOOTLOADER_HIDDENEXITCOMMAND != 0x58) && \
+	    (HAVE_BOOTLOADER_HIDDENEXITCOMMAND != 0x38))
+  }else if(rq->wValue.bytes[0] == (HAVE_BOOTLOADER_HIDDENEXITCOMMAND)){  /* cause a bootLoaderExit at disconnect */
+      stayinloader = 0xf1;  /* we need to be connected - so assume it */
+#	endif
+#endif
   }else{
       /* ignore all others, return default value == 0 */
   }
@@ -403,7 +486,12 @@ static uchar    replyBuffer[4];
     }else if(rq->bRequest == USBASP_FUNC_DISCONNECT){
 
 #if BOOTLOADER_CAN_EXIT
+#	ifdef CONFIG_HAVE__BOOTLOADER_ABORTTIMEOUTONACT
+      /* let the main loop know for ever that here was activity */
+      stayinloader	   &= (0xfc);
+#	else
       stayinloader	   &= (0xfe);
+#	endif
 #endif
     }else{
         /* ignore: others, but could be USBASP_FUNC_CONNECT */
@@ -607,32 +695,35 @@ uchar   i;
 
 /* ------------------------------------------------------------------------ */
 
-static void initForUsbConnectivity(void)
-{
 #if HAVE_UNPRECISEWAIT
-    /* (0.25s*F_CPU)/(4 cycles per loop) ~ (65536*waitloopcnt)
-     * F_CPU/(16*65536) ~ waitloopcnt
-     * F_CPU / 1048576 ~ waitloopcnt
-     */
-    uint8_t waitloopcnt = 1 + (F_CPU/1048576);
-#endif
-    usbInit();
-    /* enforce USB re-enumerate: */
-    usbDeviceDisconnect();  /* do this while interrupts are disabled */
-#if HAVE_UNPRECISEWAIT
+static void _mywait(uint8_t waitloopcnt) {
     asm volatile (
       /*we really don't care what value Z has...
        * ...if we loop 65536/F_CPU more or less...
        * ...unimportant - just save some opcodes
        */
-"initForUsbConnectivity_sleeploop:			\n\t"
+"_mywait_sleeploop%=:					\n\t"
       "sbiw	r30,	1				\n\t"
       "sbci	%0,	0				\n\t"
-      "brne	initForUsbConnectivity_sleeploop	\n\t"
+      "brne	_mywait_sleeploop%=			\n\t"
       : "+d" (waitloopcnt)
       :
       : "r30","r31"
     );
+}
+#endif
+
+static void initForUsbConnectivity(void)
+{
+    usbInit();
+    /* enforce USB re-enumerate: */
+    usbDeviceDisconnect();  /* do this while interrupts are disabled */
+#if HAVE_UNPRECISEWAIT
+    /* (0.25s*F_CPU)/(4 cycles per loop) ~ (65536*waitloopcnt)
+     * F_CPU/(16*65536) ~ waitloopcnt
+     * F_CPU / 1048576 ~ waitloopcnt
+     */
+    _mywait(1 + (F_CPU/1048576));
 #else
     _delay_ms(260);         /* fake USB disconnect for > 250 ms */
 #endif
@@ -642,6 +733,10 @@ static void initForUsbConnectivity(void)
 
 int __attribute__((__noreturn__)) main(void)
 {
+#if ((BOOTLOADER_LOOPCYCLES_TIMEOUT) && (BOOTLOADER_CAN_EXIT))
+    uint16_t __loopscycles;
+    timeout_remaining = BOOTLOADER_LOOPCYCLES_TIMEOUT;
+#endif
     /* initialize  */
     bootLoaderInit();
     odDebugInit();
@@ -650,7 +745,39 @@ int __attribute__((__noreturn__)) main(void)
     GICR = (1 << IVCE);  /* enable change of interrupt vectors */
     GICR = (1 << IVSEL); /* move interrupts to boot flash section */
 #endif
+#if (HAVE_BOOTLOADER_ADDITIONALMSDEVICEWAIT>0)    
+#	if HAVE_UNPRECISEWAIT
+    _mywait(1+((HAVE_BOOTLOADER_ADDITIONALMSDEVICEWAIT*F_CPU)/262144000));
+#	else
+    _delay_ms(HAVE_BOOTLOADER_ADDITIONALMSDEVICEWAIT);
+#	endif
+#endif
     if(bootLoaderCondition()){
+#if (BOOTLOADER_CAN_EXIT)
+#	if (USE_EXCESSIVE_ASSEMBLER)
+asm  volatile  (
+  "ldi		%[sil],		%[normval]\n\t"
+#		if ((defined(CONFIG_HAVE__BOOTLOADER_ABORTTIMEOUTONACT)) && (!(BOOTLOADER_IGNOREPROGBUTTON)) && (BOOTLOADER_LOOPCYCLES_TIMEOUT))
+  "sbis		%[pin],		%[bit]\n\t"
+  "subi		%[sil],		0x02\n\t"
+#		endif
+  : [sil]        "=d" (stayinloader)
+  : [normval]     "M" (stayinloader_initialValue)
+#		if (!(BOOTLOADER_IGNOREPROGBUTTON))
+                                                    ,
+    [pin]         "I" (_SFR_IO_ADDR(PIN_PIN(JUMPER_PORT))),
+    [bit]         "I" (PIN(JUMPER_PORT, JUMPER_BIT))
+#		endif    
+);
+#	else
+#		if ((defined(CONFIG_HAVE__BOOTLOADER_ABORTTIMEOUTONACT)) && (!(BOOTLOADER_IGNOREPROGBUTTON)) && (BOOTLOADER_LOOPCYCLES_TIMEOUT))
+      if (bootLoaderConditionSimple()) {
+	stayinloader = stayinloader_initialValue - 0x02;
+      } else
+#		endif
+	      stayinloader = stayinloader_initialValue;
+#	endif
+#endif
 #if NEED_WATCHDOG
 #	if (defined(MCUSR) && defined(WDRF))
 	/* 
@@ -663,10 +790,42 @@ int __attribute__((__noreturn__)) main(void)
 #	endif
 	wdt_disable();    /* main app may have enabled watchdog */
 #endif
+	MCUCSR = 0;       /* clear all reset flags for next time */
         initForUsbConnectivity();
         do{
+#if ((BOOTLOADER_LOOPCYCLES_TIMEOUT) && (BOOTLOADER_CAN_EXIT))
+#	ifdef CONFIG_HAVE__BOOTLOADER_ABORTTIMEOUTONACT
+	if (stayinloader != 0x0e) {
+	  /* can be reached, since high-nibble is decreased every cycle... */
+#else
+	if (stayinloader & 0x01) {
+#endif
+	  timeout_remaining = BOOTLOADER_LOOPCYCLES_TIMEOUT;
+	} else {
+	  __loopscycles++;
+	  if (!(__loopscycles)) {
+	    if(timeout_remaining)	timeout_remaining--;
+	    else			stayinloader&=0xf1;
+	  }
+	}
+#endif
             usbPoll();
 #if BOOTLOADER_CAN_EXIT
+#if BOOTLOADER_IGNOREPROGBUTTON
+  /* 
+   * remove the high nibble as it would be subtracted due to:
+   * "(!bootLoaderConditionSimple())"
+   */ 
+#if USE_EXCESSIVE_ASSEMBLER
+asm  volatile  (
+  "andi		%[sil],		0x0f\n\t"
+  : [sil]        "+d" (stayinloader)
+  :
+);
+#else
+  stayinloader &= 0x0f;
+#endif
+#else
 #if USE_EXCESSIVE_ASSEMBLER
 asm  volatile  (
   "cpi		%[sil],		0x10\n\t"
@@ -688,14 +847,15 @@ asm  volatile  (
 );
 #else
 	if (stayinloader >= 0x10) {
-	  if (!bootLoaderCondition()) {
+	  if (!bootLoaderConditionSimple()) {
 	    stayinloader-=0x10;
 	  } 
 	} else {
-	  if (bootLoaderCondition()) {
+	  if (bootLoaderConditionSimple()) {
 	    if (stayinloader > 1) stayinloader-=2;
 	  }
 	}
+#endif
 #endif
 #endif
 
