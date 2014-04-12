@@ -2,6 +2,8 @@
   #define F_CPU 1000000UL /* 1 Mhz-Takt; hier richtigen Wert eintragen */
 #endif
 
+
+#include "../misc/iofixes.h"
 #include "../firmware/spminterface.h"
 #include "usbasploader.h"
 
@@ -15,7 +17,6 @@
 #endif
 
 
-#include <avr/io.h>
 #include <avr/interrupt.h>
 #include <avr/wdt.h>
 
@@ -130,6 +131,7 @@ typedef uint32_t mypgm_addr_t;
 typedef void (*mypgm_spminterface)(const uint32_t flash_byteaddress, const uint8_t spmcrval, const uint16_t dataword);
 
 #if FLASHEND > 65535
+#	define	FULLCORRECTFLASHADDRESS(addr)	(((mypgm_addr_t)(addr)) | (((mypgm_addr_t)FLASHADDRESS) & ((mypgm_addr_t)0xffff0000)))
 #	define	mymemcpy_PF mymemcpy_PF_far
 void *mymemcpy_PF_far (void *dest, mypgm_addr_t src, size_t n) {
   uint8_t	*pagedata	= (void*)dest;
@@ -144,6 +146,7 @@ void *mymemcpy_PF_far (void *dest, mypgm_addr_t src, size_t n) {
   return dest;
 }
 #else
+#	define	FULLCORRECTFLASHADDRESS(addr)	(addr)
 #	define	mymemcpy_PF memcpy_PF 
 #endif
 
@@ -268,24 +271,47 @@ size_t mypgm_WRITEpage(const mypgm_addr_t byteaddress,const void* buffer, const 
 }
 #endif
 
+#if defined(UPDATECRC32)
+#include "crccheck.c"
+#endif
+
 // #pragma GCC diagnostic ignored "-Wno-pointer-to-int-cast"
 int main(void)
 {
+#if defined(UPDATECRC32)
+    uint32_t crcval;
+#endif
     size_t  i;
     uint8_t buffer[SPM_PAGESIZE];
     
     wdt_disable();
     cli();
 
+#if defined(UPDATECRC32)
+    // check if new firmware-image is corrupted
+    crcval = D_32;
+    for (i=0;i<SIZEOF_new_firmware;i+=1) {
+#if (FLASHEND > 65535)
+      crcval = update_crc_32(crcval, pgm_read_byte_far(FULLCORRECTFLASHADDRESS(&new_firmware[i])));
+#else
+      crcval = update_crc_32(crcval, pgm_read_byte(FULLCORRECTFLASHADDRESS(&new_firmware[i])));
+#endif
+    }
+    crcval ^= D_32;
+
+    // allow to change the firmware
+    if (crcval == ((uint32_t)UPDATECRC32)) {
+#endif
+
     // check if firmware would change...
     buffer[0]=0;
     for (i=0;i<SIZEOF_new_firmware;i+=2) {
       uint16_t a, b;
 #if (FLASHEND > 65535)
-      a=pgm_read_word_far((void*)&new_firmware[i]);
+      a=pgm_read_word_far(FULLCORRECTFLASHADDRESS(&new_firmware[i]));
       b=pgm_read_word_far(NEW_BOOTLOADER_ADDRESS+i);
 #else
-      a=pgm_read_word((void*)&new_firmware[i]);
+      a=pgm_read_word(FULLCORRECTFLASHADDRESS(&new_firmware[i]));
       b=pgm_read_word(NEW_BOOTLOADER_ADDRESS+i);
 #endif
       if (a!=b) {
@@ -312,7 +338,7 @@ int main(void)
 #ifdef CONFIG_UPDATER_CLEANMEMCLEAR
 	memset((void*)buffer, 0xff, sizeof(buffer));
 #endif
-	mymemcpy_PF((void*)buffer, (uint_farptr_t)((void*)&new_firmware[i]), ((SIZEOF_new_firmware-i)>sizeof(buffer))?sizeof(buffer):(SIZEOF_new_firmware-i));
+	mymemcpy_PF((void*)buffer, (uint_farptr_t)(FULLCORRECTFLASHADDRESS(&new_firmware[i])), ((SIZEOF_new_firmware-i)>sizeof(buffer))?sizeof(buffer):(SIZEOF_new_firmware-i));
 	
 	mypgm_WRITEpage(NEW_BOOTLOADER_ADDRESS+i, buffer, sizeof(buffer), temp_do_spm);
 	
@@ -325,7 +351,7 @@ int main(void)
 #ifdef CONFIG_UPDATER_CLEANMEMCLEAR
 	memset((void*)buffer, 0xff, sizeof(buffer));
 #endif
-	mymemcpy_PF((void*)buffer, (uint_farptr_t)((void*)&new_firmware[i]), ((SIZEOF_new_firmware-i)>sizeof(buffer))?sizeof(buffer):(SIZEOF_new_firmware-i));
+	mymemcpy_PF((void*)buffer, (uint_farptr_t)(FULLCORRECTFLASHADDRESS(&new_firmware[i])), ((SIZEOF_new_firmware-i)>sizeof(buffer))?sizeof(buffer):(SIZEOF_new_firmware-i));
 
 	mypgm_WRITEpage(NEW_BOOTLOADER_ADDRESS+i, buffer, sizeof(buffer), new_do_spm);
 	
@@ -335,4 +361,9 @@ int main(void)
 
     }
 
+#if defined(UPDATECRC32)
+    }
+#endif
+
+    return 0;
 }
