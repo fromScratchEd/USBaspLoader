@@ -11,9 +11,23 @@ DEVICE = atmega8
 # where the updating firmware should be located (starting address)
 FLASHADDRESS = 0x0000
 
-# some MCU independend defines...
+# use any fix (ATxmega compatible) crc32, uncomment to disable feature or set automatically with value "0"
+;UPDATECRC32  = 0
+
+# some MCU independent defines...
 #...will be extended within MCU dependend configuration below...
-DEFINES = -DCONFIG_NO__CHIP_ERASE -DCONFIG_NO__ONDEMAND_PAGEERASE
+DEFINES += -DCONFIG_NO__CHIP_ERASE -DCONFIG_NO__ONDEMAND_PAGEERASE
+
+# have the bootloader always enter the programming mode
+;DEFINES += -DCONFIG_HAVE__BOOTLOADER_ALWAYSENTERPROGRAMMODE
+
+# have the bootloader exit itself after around 3 seconds (@16MHz) inactivity
+;DEFINES += -DCONFIG_BOOTLOADER_LOOPCYCLES_TIMEOUT=16 -DCONFIG_HAVE__BOOTLOADER_ABORTTIMEOUTONACT
+
+# save the PROG button on the layout (CAREFUL - read feature description first)
+;DEFINES += -DCONFIG_HAVE__BOOTLOADER_IGNOREPROGBUTTON
+
+
 
 # some MCUs with small BLS (bootloader section) need to deactivate some
 # features in order to fit into BLS.
@@ -39,21 +53,36 @@ LOCKOPT = -U lock:w:0x3f:m
 #some features may be deactivated to fit into bootloader section
 #ATTANTION: CONFIG_NO... feature deactivation may not be optimal!
 
+FUSEOPT_8535            = -U lfuse:w:0x1f:m -U hfuse:w:0xc0:m
+BOOTLOADER_ADDRESS_8535 = 0x1800
+DEFINES_8535            = -DCONFIG_USE__EXCESSIVE_ASSEMBLER -DCONFIG_NO__NEED_WATCHDOG -DCONFIG_NO__PRECISESLEEP
+
+
+
 FUSEOPT_16              = -U lfuse:w:0x1f:m -U hfuse:w:0xc0:m
 BOOTLOADER_ADDRESS_16   = 0x3800
 DEFINES_16              = -DCONFIG_USE__EXCESSIVE_ASSEMBLER -DCONFIG_NO__NEED_WATCHDOG -DCONFIG_NO__PRECISESLEEP
+ifeq ($(F_CPU), 12000000)
+DEFINES_16             += -DCONFIG_NO__HAVE_READ_LOCK_FUSE
+endif
 
 
 
 FUSEOPT_88              = -U lfuse:w:0xd7:m -U hfuse:w:0xd4:m -U efuse:w:0xf8:m
 BOOTLOADER_ADDRESS_88   = 0x1800
-DEFINES_88              = -DCONFIG_NO__FLASH_BYTE_READACCESS -DCONFIG_NO__HAVE_READ_LOCK_FUSE
+DEFINES_88              = -DCONFIG_USE__EXCESSIVE_ASSEMBLER -DCONFIG_NO__NEED_WATCHDOG -DCONFIG_NO__PRECISESLEEP
+ifeq ($(F_CPU), 12000000)
+DEFINES_88             += -DCONFIG_NO__FLASH_BYTE_READACCESS
+endif
 
 
 
 FUSEOPT_164             = -U lfuse:w:0xd7:m -U hfuse:w:0xd0:m -U efuse:w:0xfc:m
 BOOTLOADER_ADDRESS_164  = 0x3800
-DEFINES_164             = -DCONFIG_NO__FLASH_BYTE_READACCESS -DCONFIG_NO__HAVE_READ_LOCK_FUSE -DCONFIG_NO__BOOTLOADER_CAN_EXIT
+DEFINES_164             = -DCONFIG_USE__EXCESSIVE_ASSEMBLER -DCONFIG_NO__NEED_WATCHDOG  -DCONFIG_NO__PRECISESLEEP -DCONFIG_NO__FLASH_BYTE_READACCESS -DCONFIG_NO__HAVE_READ_LOCK_FUSE
+ifeq ($(F_CPU), 12000000)
+DEFINES_164            += -DCONFIG_NO__BOOTLOADER_CAN_EXIT 
+endif
 
 
 
@@ -65,7 +94,7 @@ DEFINES_324             = #-DEMPTY
 
 FUSEOPT_128             = -U lfuse:w:0x1f:m -U hfuse:w:0xc0:m -U efuse:w:0xfd:m
 BOOTLOADER_ADDRESS_128  = 0x1E000
-DEFINES_128             = #-DEMPTY
+DEFINES_128             = -D__AVR_LIBC_DEPRECATED_ENABLE__
 
 
 
@@ -110,12 +139,20 @@ DEFINES_32              = #-DEMPTY
 
 
 
+FUSEOPT_162            = -U lfuse:w:0xff:m -U hfuse:w:0x90:m  -U efuse:w:0xf9:m
+BOOTLOADER_ADDRESS_162 = 0x3800
+DEFINES_162            = -DCONFIG_USE__EXCESSIVE_ASSEMBLER -DCONFIG_NO__NEED_WATCHDOG -DCONFIG_NO__PRECISESLEEP -DCONFIG_NO__HAVE_READ_LOCK_FUSE
+ifeq ($(F_CPU), 12000000)
+DEFINES_162             += -DCONFIG_NO__BOOTLOADER_CAN_EXIT
+endif
+
+
+
 FUSEOPT_168             = $(FUSEOPT_88)
 BOOTLOADER_ADDRESS_168  = 0x3800
-ifeq ($(DANGEROUS), 1)
-DEFINES_168             = -DCONFIG_NO__FLASH_BYTE_READACCESS -DCONFIG_NO__HAVE_READ_LOCK_FUSE -DCONFIG_NO__NEED_WATCHDOG
-else
-DEFINES_168             = -DCONFIG_NO__FLASH_BYTE_READACCESS -DCONFIG_NO__HAVE_READ_LOCK_FUSE -DCONFIG_NO__BOOTLOADER_CAN_EXIT
+DEFINES_168             = -DCONFIG_USE__EXCESSIVE_ASSEMBLER -DCONFIG_NO__NEED_WATCHDOG -DCONFIG_NO__PRECISESLEEP -DCONFIG_NO__FLASH_BYTE_READACCESS
+ifeq ($(F_CPU), 12000000)
+DEFINES_168            += -DCONFIG_NO__HAVE_READ_LOCK_FUSE 
 endif
 
 
@@ -149,7 +186,12 @@ DEFINES_2560             = #-DEMPTY
 
 #http://www.nongnu.org/avr-libc/user-manual/using_tools.html
 #autoselect logic
-ifeq ($(DEVICE), atmega8)
+ifeq ($(DEVICE), atmega8535)
+  FUSEOPT            = $(FUSEOPT_8535)
+  BOOTLOADER_ADDRESS = $(BOOTLOADER_ADDRESS_8535) 
+  MCUARCH            = avr4
+  DEFINES	     += $(DEFINES_8535)
+else ifeq ($(DEVICE), atmega8)
   FUSEOPT            = $(FUSEOPT_8)
   BOOTLOADER_ADDRESS = $(BOOTLOADER_ADDRESS_8) 
   MCUARCH            = avr4
@@ -184,6 +226,11 @@ else ifeq ($(DEVICE), atmega88pa)
   BOOTLOADER_ADDRESS = $(BOOTLOADER_ADDRESS_88)
   MCUARCH            = avr4
   DEFINES	     += $(DEFINES_88)
+else ifeq ($(DEVICE), atmega162)
+  FUSEOPT            = $(FUSEOPT_162)
+  BOOTLOADER_ADDRESS = $(BOOTLOADER_ADDRESS_162)
+  MCUARCH            = avr5
+  DEFINES	     += $(DEFINES_162)
 else ifeq ($(DEVICE), atmega164a)
   FUSEOPT            = $(FUSEOPT_164)
   BOOTLOADER_ADDRESS = $(BOOTLOADER_ADDRESS_164)
